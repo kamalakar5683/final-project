@@ -1,39 +1,54 @@
 import streamlit as st
-import pyttsx3
-import base64
 from PIL import Image
-import requests
-from io import BytesIO
-import time
-from transformers import AutoProcessor, BlipForConditionalGeneration
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
 import pytesseract
 from gtts import gTTS
+import io
+import base64
+import logging
 import os
-from tenacity import retry, stop_after_attempt, wait_exponential
 
-# Set up Google Gemini API key (replace 'YOUR_API_KEY' with actual key)
-GENAI_API_KEY = "AIzaSyDqui1f0QXykGcKYpHzZIlA16JLEQfLmzc"
-# Assuming you're configuring for Google Gemini
-import google.generativeai as genai
+# Static Google API Key
+GOOGLE_API_KEY = "your_api_key"
 
-genai.configure(api_key=GENAI_API_KEY)
+# Initialize models through LangChain with correct model names
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GOOGLE_API_KEY)
+vision_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=GOOGLE_API_KEY)
 
-# Initialize Text-to-Speech engine
-engine = pyttsx3.init()
+# Error handling function
+def handle_error(error):
+    logging.error(error)
+    st.error(f"Error: {str(error)}")
 
-# Load BLIP model for image captioning
-processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+# Scene understanding function
+def scene_understanding(image):
+    try:
+        image_bytes = io.BytesIO()
+        image.save(image_bytes, format='PNG')
+        image_bytes = image_bytes.getvalue()
 
-
-# Function to generate image caption using BLIP
-def generate_image_caption(image):
-    image = image.convert('RGB')
-    inputs = processor(images=image, text="Describe the image", return_tensors="pt")
-    outputs = model.generate(**inputs, max_length=50)
-    caption = processor.decode(outputs[0], skip_special_tokens=True)
-    return caption
-
+        message = HumanMessage(
+            content=[
+                {
+                    "type": "text",
+                    "text": """Describe this image for visually impaired individuals, including:
+                    - Scene layout
+                    - Main objects
+                    - People and actions
+                    - Colors and lighting
+                    - Points of interest"""
+                },
+                {
+                    "type": "image_url",
+                    "image_url": f"data:image/png;base64,{base64.b64encode(image_bytes).decode()}"
+                }
+            ]
+        )
+        response = vision_llm.invoke([message])
+        return response.content
+    except Exception as e:
+        handle_error(e)
 
 # Function to extract text from image using OCR (Tesseract)
 def extract_text_from_image(image):
@@ -42,7 +57,6 @@ def extract_text_from_image(image):
         return text.strip()
     except Exception as e:
         return f"Error extracting text: {str(e)}"
-
 
 # Function to convert text to speech using gTTS
 def text_to_speech(text):
@@ -53,7 +67,6 @@ def text_to_speech(text):
         return audio_file
     except Exception as e:
         return f"Error generating speech: {str(e)}"
-
 
 # Streamlit configuration
 st.set_page_config(page_title="AI Image Description & Speech Conversion", page_icon="🖼🎙️", layout="wide")
@@ -73,7 +86,7 @@ st.sidebar.markdown("""
 # Layout with two columns (Side by side)
 col1, col2 = st.columns(2)
 
-# Left Column: Image Description Generation (BLIP + Google Gemini)
+# Left Column: Image Description Generation (Google Gemini)
 with col1:
     st.markdown("<h2 style='text-align: center;'>Image Description</h2>", unsafe_allow_html=True)
     st.write("""
@@ -81,37 +94,15 @@ with col1:
     """)
 
     # File uploader for the image (Captioning)
-    uploaded_file = st.file_uploader("Choose an image for description...", type=["jpg", "jpeg", "png"],
-                                     label_visibility="visible")
+    uploaded_file = st.file_uploader("Choose an image for description...", type=["jpg", "jpeg", "png"], label_visibility="visible")
 
     if uploaded_file:
         image = Image.open(uploaded_file).convert("RGB")
         st.image(image, caption="Uploaded Image", use_column_width=True)
 
-        # Generate image caption
+        # Generate image caption using Google Gemini
         with st.spinner("Generating description..."):
-            caption = generate_image_caption(image)
-            st.subheader("Generated Caption:")
-            st.write(caption)
-
-
-        # Function to generate scene description using Google Gemini API
-        def generate_scene_description_with_gemini(caption):
-            try:
-                prompt = f"Generate an emotionally rich and action-based description of the following scene: {caption}"
-                model = genai.GenerativeModel("models/gemini-1.5-flash")
-                ai_assistant = model.start_chat(history=[])
-                response = ai_assistant.send_message(prompt)
-                return response.text.strip() if response and response.text else "No description generated."
-            except Exception as e:
-                return f"Error generating description: {str(e)}"
-
-
-        # Get the scene description from Google Gemini
-        description = generate_scene_description_with_gemini(caption)
-        if "Error" in description:
-            st.error(description)
-        else:
+            description = scene_understanding(image)
             st.subheader("Generated Description:")
             st.write(description)
 
@@ -123,8 +114,7 @@ with col2:
     """)
 
     # File uploader for the image (OCR)
-    ocr_uploaded_file = st.file_uploader("Choose an image with text to extract...", type=["jpg", "jpeg", "png"],
-                                         label_visibility="visible")
+    ocr_uploaded_file = st.file_uploader("Choose an image with text to extract...", type=["jpg", "jpeg", "png"], label_visibility="visible")
 
     if ocr_uploaded_file:
         # Load the uploaded image
